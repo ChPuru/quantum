@@ -1,49 +1,61 @@
-# src/blockchain.py
+"""A minimal hash-linked chain whose proof of work is QuantumValidator."""
+
+from __future__ import annotations
 
 import hashlib
+import itertools
+import json
 import time
-from .quantum_validator import QuantumValidator
+from dataclasses import asdict, dataclass, field
 
+from src.quantum_validator import QuantumValidator
+
+
+@dataclass
 class Block:
-    """A single block in the blockchain."""
-    def __init__(self, index, data, previous_hash, nonce=0):
-        self.index = index
-        self.timestamp = time.time()
-        self.data = str(data)
-        self.previous_hash = previous_hash
-        self.nonce = nonce
-        self.hash = self.calculate_hash()
+    index: int
+    data: str
+    previous_hash: str
+    timestamp: float = field(default_factory=time.time)
+    nonce: int = 0
 
-    def calculate_hash(self):
-        """Calculates the SHA-256 hash of the block's contents."""
-        block_string = str(self.index) + str(self.timestamp) + self.data + str(self.previous_hash) + str(self.nonce)
-        return hashlib.sha256(block_string.encode()).hexdigest()
+    def compute_hash(self) -> str:
+        # JSON with sorted keys, so ("1", "23") and ("12", "3") can't collide
+        # the way plain string concatenation can.
+        payload = json.dumps(asdict(self), sort_keys=True).encode()
+        return hashlib.sha256(payload).hexdigest()
+
 
 class Blockchain:
-    """The main blockchain structure."""
-    def __init__(self, quantum_validator: QuantumValidator):
-        self.chain = [self._create_genesis_block()]
-        self.validator = quantum_validator
+    def __init__(self, validator: QuantumValidator, max_nonce: int = 100_000) -> None:
+        self.validator = validator
+        self.max_nonce = max_nonce
+        self.chain = [Block(0, "genesis", "0" * 64, timestamp=0.0)]
 
-    def _create_genesis_block(self):
-        """Creates the very first block in the chain."""
-        return Block(0, "Genesis Block", "0")
-
-    def get_latest_block(self):
-        """Returns the most recent block in the chain."""
+    @property
+    def latest(self) -> Block:
         return self.chain[-1]
 
-    # THIS METHOD WAS MISSING AND HAS BEEN ADDED BACK
-    def is_chain_valid(self):
-        """Checks the integrity of the entire blockchain."""
-        for i in range(1, len(self.chain)):
-            current_block = self.chain[i]
-            previous_block = self.chain[i-1]
+    def mine(self, data: str, timestamp: float | None = None) -> Block:
+        """Try nonces until the block's circuit favours the target, then append it."""
+        block = Block(
+            index=self.latest.index + 1,
+            data=data,
+            previous_hash=self.latest.compute_hash(),
+            timestamp=time.time() if timestamp is None else timestamp,
+        )
+        for nonce in range(self.max_nonce):
+            block.nonce = nonce
+            if self.validator.is_valid(block.compute_hash()):
+                self.chain.append(block)
+                return block
+        raise RuntimeError(f"no valid nonce below {self.max_nonce}")
 
-            # Check if the block's hash is still correct
-            if current_block.hash != current_block.calculate_hash():
+    def is_valid(self) -> bool:
+        """Every block links to its parent and passes the validator (genesis excepted)."""
+        for parent, block in itertools.pairwise(self.chain):
+            if block.previous_hash != parent.compute_hash():
                 return False
-            # Check if the block points to the previous block's hash
-            if current_block.previous_hash != previous_block.hash:
+            if not self.validator.is_valid(block.compute_hash()):
                 return False
         return True

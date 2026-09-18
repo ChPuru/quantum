@@ -1,54 +1,30 @@
-# src/main.py
-
 import argparse
-from src.grover import GroverSearch
 
-def main():
-    parser = argparse.ArgumentParser(description="Grover's Quantum Search Algorithm")
-    parser.add_argument(
-        "--qubits",
-        type=int,
-        required=True,
-        help="Number of qubits (size of the search space is 2^qubits)."
-    )
-    parser.add_argument(
-        "--marked_item",
-        type=str,
-        required=True,
-        help="The binary string to search for."
-    )
+from src.grover import grover_circuit, search
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Grover search for one or more bitstrings.")
+    parser.add_argument("marked", nargs="+", help="bitstrings to find, e.g. 101 or 0110 1001")
+    parser.add_argument("--shots", type=int, default=1024)
+    parser.add_argument("--iterations", type=int, help="override the optimal iteration count")
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--draw", action="store_true", help="print the circuit")
     args = parser.parse_args()
 
     try:
-        print("--- Grover's Search Simulation ---")
-        print(f"Searching for '{args.marked_item}' in a {args.qubits}-qubit space.")
-        
-        grover = GroverSearch(num_qubits=args.qubits, marked_item=args.marked_item)
-        num_iterations = grover.build_circuit()
-        
-        print(f"Optimal number of iterations: {num_iterations}")
-        
-        results = grover.run(shots=1024)
-        found_item = results['most_frequent_result']
-        counts = results['counts']
-        
-        print("\n--- Simulation Results ---")
-        print(f"Most frequent result: {found_item}")
-        
-        success_prob = counts.get(args.marked_item, 0) / 1024
-        print(f"Probability of finding '{args.marked_item}': {success_prob:.2%}")
+        result = search(args.marked, shots=args.shots, iterations=args.iterations, seed=args.seed)
+    except ValueError as err:
+        parser.exit(1, f"error: {err}\n")
 
-        if found_item == args.marked_item:
-            print("\nResult: SUCCESS - The marked item was found with high probability.")
-        else:
-            print("\nResult: FAILURE - The marked item was not the most frequent outcome.")
-        print("---------------------------------")
-        # Optional: print the circuit
-        # print("\n--- Quantum Circuit ---")
-        # print(grover.circuit.draw(output='text'))
+    print(f"iterations          {result.iterations}")
+    print(f"most frequent       {result.most_frequent}")
+    print(f"hit rate            {result.success_rate:.1%}")
+    print(f"theoretical         {result.expected_success:.1%}")
 
-    except Exception as e:
-        print(f"\nAn error occurred: {e}")
+    if args.draw:
+        print(grover_circuit(args.marked, result.iterations).draw(output="text"))
+
 
 if __name__ == "__main__":
     main()

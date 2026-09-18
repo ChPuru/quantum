@@ -1,33 +1,20 @@
-# src/main.py
-
 import argparse
-from src.quantum_rng import QuantumRNG
 
-def main():
-    """
-    Main function to run the Quantum Random Number Generator from the command line.
-    """
-    parser = argparse.ArgumentParser(description="Quantum Random Number Generator")
-    parser.add_argument(
-        "--bits",
-        type=int,
-        default=8,
-        help="The number of random bits to generate."
-    )
+from src.quantum_rng import coin_circuit, random_bits, random_int
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Random bits from a simulated qubit.")
+    parser.add_argument("--bits", type=int, default=16)
+    parser.add_argument("--dice", action="store_true", help="also roll a six-sided die")
+    parser.add_argument("--seed", type=int)
     args = parser.parse_args()
 
-    try:
-        rng = QuantumRNG()
-        random_bits = rng.generate_bits(args.bits)
+    print(coin_circuit().draw(output="text"))
+    print(f"bits    {random_bits(args.bits, seed=args.seed)}")
+    if args.dice:
+        print(f"die     {random_int(1, 6, seed=args.seed)}")
 
-        print("--- Quantum Random Number Generator ---")
-        print(f"Generated {args.bits} random bits: {random_bits}")
-        print("\n--- Quantum Circuit Diagram ---")
-        print(rng.get_circuit_diagram())
-        print("-----------------------------------")
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,7 @@
+qiskit>=2.1
+qiskit-machine-learning>=0.9
+scikit-learn
+numpy
+pytest
+# notebook only
+matplotlib

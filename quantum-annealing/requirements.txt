@@ -1,0 +1,7 @@
+qiskit>=2.1
+numpy
+scipy
+networkx
+pytest
+# notebook only
+matplotlib

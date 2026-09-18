@@ -1,31 +1,27 @@
-# src/main.py
+import argparse
 
 import networkx as nx
-from src.qaoa_maxcut import QAOAMaxCut
 
-def main():
-    # Define a simple graph for demonstration
-    # This graph has a clear max-cut solution
-    graph = nx.Graph()
-    graph.add_nodes_from([0, 1, 2, 3])
-    graph.add_edges_from([(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)])
-    
-    try:
-        print("--- Running QAOA for Max-Cut ---")
-        print(f"Graph nodes: {list(graph.nodes())}")
-        print(f"Graph edges: {list(graph.edges())}")
+from src.qaoa_maxcut import brute_force_maxcut, solve
 
-        qaoa_solver = QAOAMaxCut(graph)
-        results = qaoa_solver.solve(reps=2)
 
-        print("\n--- Results ---")
-        print(f"Optimal solution found: {results['solution_bitstring']}")
-        print(f"Node partition sets: {results['solution_sets']}")
-        print(f"Number of edges cut: {results['num_edges_cut']}")
-        print("-----------------")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="MaxCut with QAOA on a small example graph.")
+    parser.add_argument("--reps", type=int, default=2, help="QAOA layers p")
+    parser.add_argument("--seed", type=int, default=1)
+    args = parser.parse_args()
 
-    except Exception as e:
-        print(f"\nAn error occurred: {e}")
+    # A 4-cycle with one diagonal. The best cut is 4.
+    graph = nx.Graph([(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)])
+    result = solve(graph, reps=args.reps, seed=args.seed)
+
+    left, right = result.partition
+    print(f"edges               {sorted(graph.edges)}")
+    print(f"partition           {sorted(left)} | {sorted(right)}")
+    print(f"cut value           {result.cut_value:g} (brute force: {brute_force_maxcut(graph):g})")
+    print(f"expected cut <C>    {result.expected_cut:.3f}")
+    print(f"P(best cut)         {result.best_probability:.1%}")
+
 
 if __name__ == "__main__":
     main()

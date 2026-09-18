@@ -1,81 +1,98 @@
-# src/teleportation.py
+"""Quantum teleportation of one qubit on the Qiskit Aer simulator.
 
-import numpy as np
-from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
-from qiskit.quantum_info import random_statevector, Statevector
+Circuit layout follows the teleportation chapter of the Qiskit Textbook
+(Apache-2.0, see NOTICE).
+
+Qubits: q0 holds the message, q1 is Alice's half of the Bell pair, q2 is Bob's.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister, transpile
+from qiskit.quantum_info import (
+    DensityMatrix,
+    Pauli,
+    Statevector,
+    partial_trace,
+    random_statevector,
+    state_fidelity,
+)
 from qiskit_aer import AerSimulator
 
-class Teleportation:
+
+@dataclass(frozen=True)
+class TeleportResult:
+    message: Statevector
+    received: DensityMatrix  # Bob's qubit after the corrections
+    z_bit: int  # Alice's measurement of q0
+    x_bit: int  # Alice's measurement of q1
+    fidelity: float
+
+
+def teleportation_circuit(message: Statevector | None = None) -> QuantumCircuit:
+    """Build the protocol. If `message` is given, q0 is prepared in it first."""
+    q = QuantumRegister(3, "q")
+    z = ClassicalRegister(1, "z")
+    x = ClassicalRegister(1, "x")
+    qc = QuantumCircuit(q, z, x)
+
+    if message is not None:
+        qc.initialize(message, 0)
+        qc.barrier()
+
+    # Shared Bell pair between Alice (q1) and Bob (q2).
+    qc.h(1)
+    qc.cx(1, 2)
+    qc.barrier()
+
+    # Alice measures q0 and q1 in the Bell basis.
+    qc.cx(0, 1)
+    qc.h(0)
+    qc.measure(0, z)
+    qc.measure(1, x)
+    qc.barrier()
+
+    # Bob fixes his qubit using the two classical bits.
+    with qc.if_test((x, 1)):
+        qc.x(2)
+    with qc.if_test((z, 1)):
+        qc.z(2)
+
+    return qc
+
+
+def teleport(message: Statevector, seed: int | None = None) -> TeleportResult:
+    """Run one shot and compare Bob's qubit with the message.
+
+    Alice's measurement outcome is random, so Bob's qubit is read off with a
+    partial trace over q0 and q1 instead of picking fixed amplitudes. That
+    works for all four outcomes.
     """
-    Encapsulates the logic for the Quantum Teleportation protocol.
-    """
+    qc = teleportation_circuit(message)
+    qc.save_statevector()
 
-    def __init__(self):
-        self.qr = QuantumRegister(3, name="q")
-        self.crz = ClassicalRegister(1, name="crz")
-        self.crx = ClassicalRegister(1, name="crx")
-        self.circuit = QuantumCircuit(self.qr, self.crz, self.crx)
-        self.backend = AerSimulator()
+    backend = AerSimulator()
+    result = backend.run(transpile(qc, backend), shots=1, seed_simulator=seed).result()
 
-    def _create_bell_pair(self):
-        """Creates an entangled Bell pair between q1 and q2."""
-        self.circuit.h(1)
-        self.circuit.cx(1, 2)
-        self.circuit.barrier()
+    # Counts keys list registers last-first, so "x z".
+    x_bit, z_bit = (int(b) for b in next(iter(result.get_counts())).split())
+    received = partial_trace(result.get_statevector(), [0, 1])
+    return TeleportResult(
+        message=message,
+        received=received,
+        z_bit=z_bit,
+        x_bit=x_bit,
+        fidelity=state_fidelity(received, message),
+    )
 
-    def _alice_operations(self):
-        """Alice performs operations on her message qubit (q0) and her entangled qubit (q1)."""
-        self.circuit.cx(0, 1)
-        self.circuit.h(0)
-        self.circuit.barrier()
 
-    def _alice_measures(self):
-        """Alice measures her two qubits and stores the results in classical registers."""
-        self.circuit.measure(0, self.crz)
-        self.circuit.measure(1, self.crx)
-        self.circuit.barrier()
+def random_message(seed: int | None = None) -> Statevector:
+    return random_statevector(2, seed=seed)
 
-    def _bob_operations(self):
-        """Bob applies gates to his qubit (q2) based on the classical bits Alice sent him."""
-        with self.circuit.if_test((self.crx, 1)):
-            self.circuit.x(2)
-        with self.circuit.if_test((self.crz, 1)):
-            self.circuit.z(2)
 
-    def build_circuit(self):
-        """Builds the full teleportation circuit."""
-        self._create_bell_pair()
-        self._alice_operations()
-        self._alice_measures()
-        self._bob_operations()
-        return self.circuit
-
-    def run_and_verify(self, initial_state_vec: Statevector):
-        """
-        Runs the simulation and verifies the teleportation.
-        """
-        sim_circuit = self.circuit.copy()
-        sim_circuit.save_statevector()
-        
-        result = self.backend.run(sim_circuit).result()
-        final_statevector = result.get_statevector()
-
-        # The statevector is ordered |q2 q1 q0>.
-        # We extract the amplitudes corresponding to |00> for Alice's qubits.
-        bob_vector_data = [final_statevector.data[0], final_statevector.data[4]]
-        
-        # The Statevector constructor automatically normalizes the data.
-        bob_final_state = Statevector(bob_vector_data) # <-- This is the corrected line
-
-        # Compare the initial and final states
-        success = initial_state_vec.equiv(bob_final_state)
-
-        return {
-            "initial_state": initial_state_vec.data,
-            "final_state": bob_final_state.data,
-            "success": success
-        }
-
-def create_random_message_state():
-    """Creates a random single-qubit statevector."""
-    return random_statevector(2, seed=np.random.randint(1000))
+def bloch_vector(state: Statevector | DensityMatrix) -> tuple[float, float, float]:
+    """(<X>, <Y>, <Z>) for a single-qubit state."""
+    x, y, z = (float(state.expectation_value(Pauli(p)).real) for p in "XYZ")
+    return x, y, z

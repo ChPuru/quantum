@@ -1,0 +1,5 @@
+qiskit>=2.1
+pytest
+# notebook only
+matplotlib
+pylatexenc

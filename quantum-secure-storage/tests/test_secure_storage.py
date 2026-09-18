@@ -1,49 +1,57 @@
-# tests/test_secure_storage.py
-
-import unittest
 import os
-from src.bb84_key_exchange import BB84KeyExchange
-from src.classical_crypto import ClassicalCrypto
 
-class TestSecureStorage(unittest.TestCase):
+import pytest
+from cryptography.exceptions import InvalidTag
 
-    def test_end_to_end_cycle(self):
-        """
-        Tests the full cycle: key generation, encryption, and decryption.
-        """
-        # 1. Generate a key
-        qkd = BB84KeyExchange()
-        key = qkd.generate_secure_key(key_length_bytes=32)
-        self.assertEqual(len(key), 32)
+from src.bb84_key_exchange import KEY_BYTES, EavesdropperDetected, exchange_key
+from src.classical_crypto import NONCE_BYTES, decrypt, encrypt
 
-        # 2. Encrypt some data
-        crypto_system = ClassicalCrypto(key=key)
-        original_data = b"test data for the cycle"
-        nonce, ciphertext = crypto_system.encrypt(original_data)
 
-        # 3. Decrypt the data
-        decrypted_data = crypto_system.decrypt(nonce, ciphertext)
-        
-        # 4. Verify
-        self.assertEqual(original_data, decrypted_data)
+def test_honest_exchange_gives_matching_keys() -> None:
+    kx = exchange_key(seed=1)
+    assert kx.alice_key == kx.bob_key
+    assert len(kx.alice_key) == KEY_BYTES
+    assert kx.qber == 0.0
 
-    def test_decryption_failure_with_wrong_key(self):
-        """
-        Tests that decryption fails if the wrong key is used.
-        """
-        key1 = os.urandom(32)
-        key2 = os.urandom(32)
-        self.assertNotEqual(key1, key2)
 
-        crypto1 = ClassicalCrypto(key=key1)
-        original_data = b"some secret message"
-        nonce, ciphertext = crypto1.encrypt(original_data)
+def test_different_seeds_give_different_keys() -> None:
+    assert exchange_key(seed=1).alice_key != exchange_key(seed=2).alice_key
 
-        # Try to decrypt with the wrong key
-        crypto2 = ClassicalCrypto(key=key2)
-        decrypted_data = crypto2.decrypt(nonce, ciphertext)
 
-        self.assertIsNone(decrypted_data)
+def test_eavesdropper_is_detected() -> None:
+    with pytest.raises(EavesdropperDetected):
+        exchange_key(eavesdrop=True, seed=3)
 
-if __name__ == '__main__':
-    unittest.main()
+
+def test_round_trip() -> None:
+    key = exchange_key(seed=4).alice_key
+    blob = encrypt(key, b"secret")
+    assert len(blob) == NONCE_BYTES + len(b"secret") + 16  # 16-byte GCM tag
+    assert decrypt(key, blob) == b"secret"
+
+
+def test_nonce_changes_every_time() -> None:
+    key = os.urandom(32)
+    assert encrypt(key, b"same") != encrypt(key, b"same")
+
+
+def test_wrong_key_is_rejected() -> None:
+    blob = encrypt(os.urandom(32), b"secret")
+    with pytest.raises(InvalidTag):
+        decrypt(os.urandom(32), blob)
+
+
+def test_tampering_is_rejected() -> None:
+    key = os.urandom(32)
+    blob = bytearray(encrypt(key, b"secret"))
+    blob[-1] ^= 1
+    with pytest.raises(InvalidTag):
+        decrypt(key, bytes(blob))
+
+
+def test_associated_data_must_match() -> None:
+    key = os.urandom(32)
+    blob = encrypt(key, b"secret", associated_data=b"file-1")
+    assert decrypt(key, blob, associated_data=b"file-1") == b"secret"
+    with pytest.raises(InvalidTag):
+        decrypt(key, blob, associated_data=b"file-2")

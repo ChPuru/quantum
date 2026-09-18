@@ -1,44 +1,72 @@
-# tests/test_blockchain.py
+import itertools
 
-import unittest
+import pytest
+
+from src.blockchain import Block, Blockchain
 from src.quantum_validator import QuantumValidator
-from src.blockchain import Blockchain, Block
 
-class TestQuantumBlockchain(unittest.TestCase):
 
-    def setUp(self):
-        self.validator = QuantumValidator(num_qubits=4, target_state='1111')
-        self.blockchain = Blockchain(self.validator)
+@pytest.fixture
+def chain() -> Blockchain:
+    bc = Blockchain(QuantumValidator(num_qubits=4))
+    for i, data in enumerate(["a", "b", "c"]):
+        bc.mine(data, timestamp=float(i + 1))
+    return bc
 
-    def test_block_creation(self):
-        """Test that a block is created with the correct attributes."""
-        latest_block = self.blockchain.get_latest_block()
-        new_block = Block(latest_block.index + 1, "Test Data", latest_block.hash)
-        self.assertEqual(new_block.index, 1)
-        self.assertEqual(new_block.data, "Test Data")
-        self.assertEqual(new_block.previous_hash, latest_block.hash)
 
-    def test_validation_failure(self):
-        """
-        Test that a block with arbitrary data (which is very unlikely to be valid) fails validation.
-        """
-        # This block is statistically almost certain to be invalid.
-        is_added = self.blockchain.add_block("This data will almost certainly not produce the target state")
-        self.assertFalse(is_added)
+def test_mined_chain_is_valid(chain: Blockchain) -> None:
+    assert len(chain.chain) == 4
+    assert chain.is_valid()
+    for block in chain.chain[1:]:
+        assert chain.validator.is_valid(block.compute_hash())
 
-    def test_chain_tampering(self):
-        """Test that the classical chain integrity check detects tampering."""
-        # We need to find a valid block first to add to the chain.
-        # For testing, we can bypass the quantum check to add a block.
-        latest_block = self.blockchain.get_latest_block()
-        new_block = Block(latest_block.index + 1, "Valid Data", latest_block.hash)
-        self.blockchain.chain.append(new_block)
-        
-        # Now, tamper with the block
-        self.blockchain.chain[1].data = "Tampered Data"
-        
-        # The chain should now be invalid
-        self.assertFalse(self.blockchain.is_chain_valid())
 
-if __name__ == '__main__':
-    unittest.main()
+def test_blocks_link_to_parents(chain: Blockchain) -> None:
+    for parent, block in itertools.pairwise(chain.chain):
+        assert block.previous_hash == parent.compute_hash()
+        assert block.index == parent.index + 1
+
+
+def test_editing_a_block_breaks_the_chain(chain: Blockchain) -> None:
+    chain.chain[1].data = "tampered"
+    assert not chain.is_valid()
+
+
+def test_editing_the_last_block_fails_validation(chain: Blockchain) -> None:
+    chain.chain[-1].data = "tampered"
+    assert not chain.is_valid()
+
+
+def test_validation_is_deterministic() -> None:
+    validator = QuantumValidator(num_qubits=4)
+    block_hash = Block(1, "x", "0" * 64, timestamp=0.0).compute_hash()
+    assert len({validator.is_valid(block_hash) for _ in range(20)}) == 1
+
+
+def test_probabilities_sum_to_one() -> None:
+    probs = QuantumValidator(3).probabilities("0123456789abcdef" * 4)
+    assert sum(probs.values()) == pytest.approx(1.0)
+
+
+def test_hash_depends_on_every_field() -> None:
+    base = Block(1, "x", "0" * 64, timestamp=1.0, nonce=0)
+    changed = [
+        Block(2, "x", "0" * 64, timestamp=1.0, nonce=0),
+        Block(1, "y", "0" * 64, timestamp=1.0, nonce=0),
+        Block(1, "x", "1" * 64, timestamp=1.0, nonce=0),
+        Block(1, "x", "0" * 64, timestamp=2.0, nonce=0),
+        Block(1, "x", "0" * 64, timestamp=1.0, nonce=1),
+    ]
+    assert len({base.compute_hash(), *(b.compute_hash() for b in changed)}) == 6
+
+
+def test_mining_gives_up_after_max_nonce() -> None:
+    bc = Blockchain(QuantumValidator(num_qubits=6), max_nonce=3)
+    with pytest.raises(RuntimeError):
+        bc.mine("hard", timestamp=0.0)
+
+
+@pytest.mark.parametrize(("n", "target"), [(4, "111"), (3, "10a"), (0, "")])
+def test_rejects_bad_targets(n: int, target: str) -> None:
+    with pytest.raises(ValueError):
+        QuantumValidator(n, target)

@@ -1,59 +1,56 @@
-# tests/test_bb84.py
-
-import unittest
 import numpy as np
-from src.bb84 import BB84, Z_BASIS, X_BASIS
+import pytest
 
-class TestBB84(unittest.TestCase):
-    
-    def test_init(self):
-        """Test that the BB84 class initializes correctly."""
-        protocol = BB84(num_bits=10)
-        self.assertEqual(protocol.num_bits, 10)
-        self.assertEqual(len(protocol.alice_bits), 10)
-        self.assertEqual(len(protocol.alice_bases), 10)
-        self.assertEqual(len(protocol.bob_bases), 10)
+from src.bb84 import X, Z, bb84_circuit, run
 
-    def test_sifting(self):
-        """Test the key sifting logic."""
-        protocol = BB84(num_bits=8)
-        # Manually set bases for a predictable outcome
-        protocol.alice_bases = np.array([Z_BASIS, X_BASIS, Z_BASIS, X_BASIS, Z_BASIS, X_BASIS, Z_BASIS, X_BASIS])
-        protocol.bob_bases   = np.array([Z_BASIS, Z_BASIS, X_BASIS, X_BASIS, Z_BASIS, X_BASIS, X_BASIS, Z_BASIS])
-        # Matches should be at indices 0, 3, 4, 5
-        
-        bob_mock_bits = np.array([0, 1, 0, 1, 0, 1, 0, 1])
-        
-        alice_sifted, bob_sifted = protocol._sift_keys(bob_mock_bits)
-        
-        self.assertEqual(len(alice_sifted), 4)
-        self.assertEqual(len(bob_sifted), 4)
-        
-        expected_alice_sifted = protocol.alice_bits[[0, 3, 4, 5]]
-        np.testing.assert_array_equal(alice_sifted, expected_alice_sifted)
 
-    def test_simulation_no_eavesdropper(self):
-        """Test a full simulation without Eve, expecting a 0% error rate."""
-        protocol = BB84(num_bits=100)
-        results = protocol.simulate(eavesdrop=False)
-        self.assertFalse(results['eavesdropper_detected'])
-        self.assertEqual(results['error_rate'], 0.0)
+def test_no_eavesdropper_gives_matching_keys() -> None:
+    for seed in range(5):
+        r = run(200, seed=seed)
+        assert r.qber == 0.0
+        assert not r.aborted
+        assert r.alice_key == r.bob_key
+        assert len(r.alice_key) == len(r.sifted) - len(r.checked)
 
-    def test_simulation_with_eavesdropper(self):
-        """Test a full simulation with Eve, expecting a non-zero error rate."""
-        # Run multiple times as the random nature might occasionally result in 0 errors
-        for _ in range(5):
-            protocol = BB84(num_bits=200)
-            results = protocol.simulate(eavesdrop=True)
-            # With an eavesdropper, the error rate should be around 25% on the sifted key
-            # We check if it's > 0, which is a strong indicator.
-            if results['error_rate'] > 0:
-                self.assertTrue(results['eavesdropper_detected'])
-                return
-        # If after 5 runs we still get 0 error, something might be wrong, but it's statistically unlikely.
-        # For a robust test, one might check if the error rate is > 0 over many runs.
-        # For this test, we'll raise an assertion failure if it's always 0.
-        self.fail("Eavesdropper simulation consistently resulted in 0% error rate, which is highly unlikely.")
 
-if __name__ == '__main__':
-    unittest.main()
+def test_bob_reads_alice_whenever_bases_match() -> None:
+    r = run(500, seed=1)
+    np.testing.assert_array_equal(r.alice_bits[r.sifted], r.bob_bits[r.sifted])
+
+
+def test_mismatched_bases_give_coin_flips() -> None:
+    r = run(4000, seed=2)
+    other = np.flatnonzero(r.alice_bases != r.bob_bases)
+    agreement = np.mean(r.alice_bits[other] == r.bob_bits[other])
+    assert agreement == pytest.approx(0.5, abs=0.04)
+
+
+def test_eavesdropper_causes_quarter_error_rate() -> None:
+    r = run(4000, eavesdrop=True, seed=3)
+    assert r.qber == pytest.approx(0.25, abs=0.03)
+    assert r.aborted
+
+
+def test_sifting_and_sampling_sizes() -> None:
+    r = run(1000, seed=4)
+    assert len(r.sifted) == pytest.approx(500, abs=60)
+    assert len(r.checked) == round(len(r.sifted) * 0.5)
+    assert set(r.checked) <= set(r.sifted)
+
+
+def test_fixed_inputs() -> None:
+    bits = np.array([0, 1, 1, 0])
+    bases = np.array([Z, Z, X, X])
+    qc = bb84_circuit(bits, bases, bases)
+    assert qc.count_ops()["h"] == 4  # two for Alice, two for Bob
+    assert qc.count_ops()["x"] == 2
+
+
+def test_same_seed_same_run() -> None:
+    assert run(100, eavesdrop=True, seed=7).alice_key == run(100, eavesdrop=True, seed=7).alice_key
+
+
+@pytest.mark.parametrize(("n", "fraction"), [(0, 0.5), (10, 0.0), (10, 1.0)])
+def test_rejects_bad_input(n: int, fraction: float) -> None:
+    with pytest.raises(ValueError):
+        run(n, check_fraction=fraction)

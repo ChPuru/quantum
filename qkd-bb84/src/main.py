@@ -1,45 +1,26 @@
-# src/main.py
-
 import argparse
-from src.bb84 import BB84
 
-def main():
-    parser = argparse.ArgumentParser(description="BB84 Quantum Key Distribution Simulation")
-    parser.add_argument(
-        "--bits",
-        type=int,
-        default=30,
-        help="The number of bits in the initial key exchange."
-    )
-    parser.add_argument(
-        "--eavesdrop",
-        action="store_true",
-        help="Simulate with an eavesdropper present."
-    )
+from src.bb84 import QBER_LIMIT, run
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Simulate BB84 key distribution.")
+    parser.add_argument("--bits", type=int, default=64, help="qubits Alice sends")
+    parser.add_argument("--eavesdrop", action="store_true", help="add an intercept-resend Eve")
+    parser.add_argument("--seed", type=int)
     args = parser.parse_args()
 
-    try:
-        protocol = BB84(num_bits=args.bits)
-        results = protocol.simulate(eavesdrop=args.eavesdrop)
+    r = run(args.bits, eavesdrop=args.eavesdrop, seed=args.seed)
+    print(f"sent                {args.bits} qubits")
+    print(f"same basis          {len(r.sifted)}")
+    print(f"revealed for check  {len(r.checked)}")
+    print(f"QBER                {r.qber:.1%} (abort above {QBER_LIMIT:.0%})")
+    if r.aborted:
+        print("result              aborted, the channel looks tapped")
+    else:
+        print(f"{f'key ({len(r.alice_key)} bits)':<20}{r.alice_key}")
+        print(f"keys match          {r.alice_key == r.bob_key}")
 
-        print("--- BB84 Simulation Results ---")
-        print(f"Eavesdropper Present: {args.eavesdrop}")
-        print("-" * 31)
-        print(f"Initial Key Length:    {results['initial_key_length']}")
-        print(f"Sifted Key Length:     {results['sifted_key_length']} (approx. 50%)")
-        print(f"Final Shared Key Length: {results['final_key_length']} (approx. 25%)")
-        print(f"Quantum Bit Error Rate (QBER): {results['error_rate']:.2%}")
-        print("-" * 31)
-
-        if results['eavesdropper_detected']:
-            print("\nResult: EAVESDROPPER DETECTED! Key exchange aborted.")
-        else:
-            print("\nResult: Key exchange successful.")
-            print(f"Final Shared Secret Key: {results['final_key']}")
-        print("---------------------------------")
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
 
 if __name__ == "__main__":
     main()

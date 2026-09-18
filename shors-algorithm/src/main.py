@@ -1,40 +1,26 @@
-# src/main.py
-
 import argparse
-from src.shors import Shor
 
-def main():
-    parser = argparse.ArgumentParser(description="Shor's Algorithm for Integer Factorization")
-    parser.add_argument(
-        "--number",
-        type=int,
-        default=15,
-        help="The integer to factor. This demo is optimized for N=15."
-    )
+from src.shors import factor
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Factor a small integer with Shor's algorithm.")
+    parser.add_argument("number", type=int, nargs="?", default=15, help="odd composite, < 128")
+    parser.add_argument("-a", type=int, help="fix the base a instead of picking it at random")
+    parser.add_argument("--shots", type=int, default=16)
+    parser.add_argument("--seed", type=int)
     args = parser.parse_args()
 
-    if args.number != 15:
-        print("Warning: This demo's modular exponentiation circuit is hardcoded for N=15.")
-        print("Running with other numbers is not supported by this simplified implementation.")
-        return
-
     try:
-        print(f"--- Running Shor's Algorithm to Factor N={args.number} ---")
-        
-        shor_instance = Shor(N=args.number)
-        results = shor_instance.run()
+        result = factor(args.number, a=args.a, shots=args.shots, seed=args.seed)
+    except (ValueError, RuntimeError) as err:
+        parser.exit(1, f"error: {err}\n")
 
-        print("\n--- Results ---")
-        print(f"Status: {results['status']}")
-        print(f"Method: {results['method']}")
-        if results['status'] == 'SUCCESS':
-            p, q = results['factors']
-            print(f"Found factors: {p} and {q}")
-            print(f"Verification: {p} * {q} = {p*q}")
-        print("---------------")
+    p, q = result.factors
+    print(f"{result.n} = {p} x {q}  (method: {result.method})")
+    if result.method == "order finding":
+        print(f"a = {result.a}, order r = {result.order}, attempts = {result.attempts}")
 
-    except Exception as e:
-        print(f"\nAn error occurred: {e}")
 
 if __name__ == "__main__":
     main()

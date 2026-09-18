@@ -1,74 +1,48 @@
-# src/quantum_rng.py
+"""Random bits from measuring a qubit in the |+> state.
+
+Measuring |+> in the Z basis gives 0 or 1 with probability 1/2 each. On real
+hardware that randomness comes from the measurement itself (plus some device
+bias). On the Aer simulator it comes from Aer's pseudorandom number
+generator, so the output here is pseudorandom and reproducible with a seed.
+Treat this as a demo of the circuit, not as a source of secrets.
+"""
+
+from __future__ import annotations
 
 from qiskit import QuantumCircuit
-from qiskit_aer import Aer # Corrected import for Aer
-import numpy as np
+from qiskit_aer import AerSimulator
 
-class QuantumRNG:
+
+def coin_circuit() -> QuantumCircuit:
+    qc = QuantumCircuit(1, 1)
+    qc.h(0)
+    qc.measure(0, 0)
+    return qc
+
+
+def random_bits(n: int, seed: int | None = None) -> str:
+    """n bits, one per shot of the one-qubit circuit."""
+    if n < 1:
+        raise ValueError("n must be positive")
+    job = AerSimulator().run(coin_circuit(), shots=n, memory=True, seed_simulator=seed)
+    return "".join(job.result().get_memory())
+
+
+def random_int(low: int, high: int, seed: int | None = None) -> int:
+    """Uniform integer in [low, high].
+
+    Draws just enough bits to cover the range and rejects values past the top,
+    so every result is equally likely. Taking the bits mod the range size would
+    favour small values.
     """
-    A Quantum Random Number Generator.
-
-    This class uses the principles of quantum mechanics to generate true random numbers.
-    It leverages the Qiskit framework to create a quantum circuit, apply a Hadamard
-    gate to induce superposition, and then measure the state of the qubits to
-    produce random bits.
-    """
-
-    def __init__(self, backend_name: str = 'aer_simulator'):
-        """
-        Initializes the QuantumRNG.
-
-        Args:
-            backend_name (str): The name of the Qiskit Aer backend to use.
-                                Defaults to 'aer_simulator'.
-        """
-        # The 'qasm_simulator' is legacy, 'aer_simulator' is the modern standard
-        self.backend = Aer.get_backend(backend_name)
-        self.circuit = None
-
-    def _build_circuit(self, num_bits: int):
-        """
-        Builds the quantum circuit for generating random bits.
-
-        Args:
-            num_bits (int): The number of random bits to generate.
-        """
-        self.circuit = QuantumCircuit(num_bits, num_bits)
-        # Apply Hadamard gate to all qubits to put them in a superposition
-        self.circuit.h(range(num_bits))
-        # Measure all qubits
-        self.circuit.measure(range(num_bits), range(num_bits))
-
-    def generate_bits(self, num_bits: int) -> str:
-        """
-        Generates a string of random bits.
-
-        Args:
-            num_bits (int): The number of random bits to generate.
-
-        Returns:
-            str: A string of random bits.
-        """
-        if not isinstance(num_bits, int) or num_bits <= 0:
-            raise ValueError("Number of bits must be a positive integer.")
-
-        self._build_circuit(num_bits)
-        
-        # The modern way to run a job, replacing the deprecated execute()
-        job = self.backend.run(self.circuit, shots=1, memory=True)
-        result = job.result()
-        
-        # Using memory=True gives us a list of the results, e.g., ['10110']
-        # This is more direct than getting counts for a single shot.
-        return result.get_memory(self.circuit)[0]
-
-    def get_circuit_diagram(self):
-        """
-        Returns a string representation of the quantum circuit diagram.
-
-        Returns:
-            str: The circuit diagram.
-        """
-        if self.circuit is None:
-            return "Circuit has not been built yet. Call generate_bits() first."
-        return str(self.circuit.draw(output='text'))
+    if high < low:
+        raise ValueError("high must be >= low")
+    span = high - low + 1
+    width = max(1, (span - 1).bit_length())
+    # Each draw succeeds with probability > 1/2, so 64 draws almost never all fail.
+    bits = random_bits(width * 64, seed=seed)
+    for i in range(0, len(bits), width):
+        value = int(bits[i : i + width], 2)
+        if value < span:
+            return low + value
+    raise RuntimeError("rejection sampling failed 64 times in a row")

@@ -1,37 +1,40 @@
-# tests/test_teleportation.py
-
-import unittest
+import pytest
 from qiskit.quantum_info import Statevector
-from src.teleportation import Teleportation
 
-class TestTeleportation(unittest.TestCase):
+from src.teleportation import bloch_vector, random_message, teleport, teleportation_circuit
 
-    def test_protocol_correctness(self):
-        """
-        Tests the full teleportation protocol by sending a known state
-        and verifying the output state.
-        """
-        # Create a known, non-trivial initial state for the message qubit
-        # This state is |+>
-        initial_state = Statevector.from_label('+')
 
-        # Initialize the circuit with this state
-        teleporter = Teleportation()
-        teleporter.circuit.initialize(initial_state, 0)
-        teleporter.circuit.barrier()
+@pytest.mark.parametrize("label", ["0", "1", "+", "-", "r", "l"])
+def test_teleports_basis_states(label: str) -> None:
+    message = Statevector.from_label(label)
+    for seed in range(8):
+        assert teleport(message, seed=seed).fidelity == pytest.approx(1.0)
 
-        # Build the protocol circuit
-        teleporter.build_circuit()
 
-        # Run the verification
-        results = teleporter.run_and_verify(initial_state)
+def test_every_measurement_outcome_works() -> None:
+    message = random_message(seed=7)
+    outcomes = set()
+    for seed in range(40):
+        result = teleport(message, seed=seed)
+        assert result.fidelity == pytest.approx(1.0)
+        outcomes.add((result.z_bit, result.x_bit))
+    assert outcomes == {(0, 0), (0, 1), (1, 0), (1, 1)}
 
-        # Assert that the protocol was successful
-        self.assertTrue(results['success'], "The final state should match the initial state.")
-        
-        # Optional: Check if the final state is indeed close to |+>
-        # final_state_vec = Statevector(results['final_state'])
-        # self.assertTrue(final_state_vec.equiv(initial_state))
 
-if __name__ == '__main__':
-    unittest.main()
+def test_random_messages() -> None:
+    for seed in range(10):
+        message = random_message(seed)
+        assert teleport(message, seed=seed).fidelity == pytest.approx(1.0)
+
+
+def test_bloch_vectors_match() -> None:
+    message = random_message(seed=3)
+    received = teleport(message, seed=3).received
+    assert bloch_vector(received) == pytest.approx(bloch_vector(message))
+
+
+def test_circuit_shape() -> None:
+    qc = teleportation_circuit()
+    assert qc.num_qubits == 3
+    assert qc.num_clbits == 2
+    assert qc.count_ops()["measure"] == 2

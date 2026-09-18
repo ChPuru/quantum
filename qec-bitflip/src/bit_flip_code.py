@@ -1,92 +1,121 @@
-# src/bit_flip_code.py
+"""Three-qubit bit-flip code with syndrome measurement and feed-forward correction.
 
-import numpy as np
-from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
-from qiskit.quantum_info import random_statevector, Statevector
+Qubits: q0-q2 hold the code word, q3 and q4 are ancillas.
+q3 measures the parity of q0 and q1, q4 the parity of q1 and q2, and the
+two-bit syndrome s = q3 + 2*q4 points at the flipped qubit:
+
+    s = 0  no error
+    s = 1  q0 flipped
+    s = 3  q1 flipped
+    s = 2  q2 flipped
+
+The code corrects any single bit flip. Two or more flips produce a logical X.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister, transpile
+from qiskit.quantum_info import DensityMatrix, Statevector, partial_trace, state_fidelity
 from qiskit_aer import AerSimulator
+from qiskit_aer.noise import pauli_error
 
-class BitFlipCode:
+SYNDROME_TO_QUBIT = {1: 0, 3: 1, 2: 2}
+
+
+@dataclass(frozen=True)
+class CorrectionResult:
+    syndrome: int
+    corrected_qubit: int | None
+    decoded: DensityMatrix  # q0 after decoding
+    fidelity: float  # against the input state
+
+
+def encode(qc: QuantumCircuit) -> None:
+    qc.cx(0, 1)
+    qc.cx(0, 2)
+
+
+def decode(qc: QuantumCircuit) -> None:
+    qc.cx(0, 2)
+    qc.cx(0, 1)
+
+
+def measure_and_correct(qc: QuantumCircuit, syndrome: ClassicalRegister) -> None:
+    qc.cx(0, 3)
+    qc.cx(1, 3)
+    qc.cx(1, 4)
+    qc.cx(2, 4)
+    qc.measure(3, syndrome[0])
+    qc.measure(4, syndrome[1])
+    for value, qubit in SYNDROME_TO_QUBIT.items():
+        with qc.if_test((syndrome, value)):
+            qc.x(qubit)
+
+
+def bit_flip_circuit(
+    state: Statevector | None = None, errors: Sequence[int] = ()
+) -> QuantumCircuit:
+    """Prepare, encode, flip the qubits in `errors`, correct, decode."""
+    if any(q not in (0, 1, 2) for q in errors):
+        raise ValueError("errors can only hit data qubits 0, 1 and 2")
+
+    syndrome = ClassicalRegister(2, "syndrome")
+    qc = QuantumCircuit(QuantumRegister(5, "q"), syndrome)
+    if state is not None:
+        qc.initialize(state, 0)
+    encode(qc)
+    qc.barrier()
+    for q in errors:
+        qc.x(q)
+    qc.barrier()
+    measure_and_correct(qc, syndrome)
+    qc.barrier()
+    decode(qc)
+    return qc
+
+
+def run(
+    state: Statevector, errors: Sequence[int] = (), seed: int | None = None
+) -> CorrectionResult:
+    """Run one shot and compare the decoded q0 with the input state."""
+    qc = bit_flip_circuit(state, errors)
+    qc.save_statevector()
+    backend = AerSimulator()
+    result = backend.run(transpile(qc, backend), shots=1, seed_simulator=seed).result()
+
+    syndrome = int(next(iter(result.get_counts())), 2)
+    decoded = partial_trace(result.get_statevector(), [1, 2, 3, 4])
+    return CorrectionResult(
+        syndrome=syndrome,
+        corrected_qubit=SYNDROME_TO_QUBIT.get(syndrome),
+        decoded=decoded,
+        fidelity=state_fidelity(decoded, state),
+    )
+
+
+def logical_error_rate(p: float, shots: int = 4000, seed: int | None = None) -> float:
+    """Encode |0>, flip each data qubit with probability p, correct, and count logical flips.
+
+    Theory says 3p^2 - 2p^3, against p for a bare qubit.
     """
-    Encapsulates the logic for the 3-qubit bit-flip error correction code.
-    """
+    syndrome = ClassicalRegister(2, "syndrome")
+    out = ClassicalRegister(1, "out")
+    qc = QuantumCircuit(QuantumRegister(5, "q"), syndrome, out)
+    encode(qc)
+    noise = pauli_error([("X", p), ("I", 1 - p)])
+    for q in range(3):
+        qc.append(noise, [q])
+    measure_and_correct(qc, syndrome)
+    decode(qc)
+    qc.measure(0, out[0])
 
-    def __init__(self, initial_state: Statevector):
-        if not isinstance(initial_state, Statevector) or initial_state.dim != 2:
-            raise TypeError("Initial state must be a single-qubit Statevector.")
-        
-        self.initial_state = initial_state
-        self.q = QuantumRegister(5, name='q')
-        self.syn = ClassicalRegister(2, name='syndrome')
-        self.circuit = QuantumCircuit(self.q, self.syn)
-        self.circuit.initialize(self.initial_state, 0)
-        self.circuit.barrier()
-
-    def _encode(self):
-        """Encodes the logical qubit (q0) onto two ancilla qubits (q1, q2)."""
-        self.circuit.cx(0, 1)
-        self.circuit.cx(0, 2)
-        self.circuit.barrier()
-
-    def introduce_error(self, error_qubit_index: int):
-        """Applies a single X-gate (bit-flip) error to one of the encoded qubits."""
-        if not 0 <= error_qubit_index <= 2:
-            raise ValueError("Error can only be applied to the first 3 qubits (0, 1, or 2).")
-        
-        print(f"INFO: Introducing a bit-flip error on qubit {error_qubit_index}.")
-        self.circuit.x(error_qubit_index)
-        self.circuit.barrier()
-
-    def _detect_and_correct(self):
-        """Builds the syndrome measurement and correction circuit."""
-        # Syndrome measurement
-        self.circuit.cx(0, 3)
-        self.circuit.cx(1, 3)
-        self.circuit.cx(1, 4)
-        self.circuit.cx(2, 4)
-        self.circuit.measure(self.q[3], self.syn[0])
-        self.circuit.measure(self.q[4], self.syn[1])
-        self.circuit.barrier()
-
-        # Corrected logic from previous step
-        with self.circuit.if_test((self.syn, 1)): # Syndrome '01' -> Error on q0
-            self.circuit.x(0)
-        with self.circuit.if_test((self.syn, 2)): # Syndrome '10' -> Error on q2
-            self.circuit.x(2)
-        with self.circuit.if_test((self.syn, 3)): # Syndrome '11' -> Error on q1
-            self.circuit.x(1)
-
-    def run_and_verify(self):
-        """
-        Runs the full simulation and verifies if the encoded state was recovered.
-        """
-        # 1. Encode the state
-        self._encode()
-        
-        # 2. Save the "correct" encoded state for later comparison
-        self.circuit.save_statevector(label="correct_encoded_state")
-        
-        # 3. Introduce a random error
-        error_location = np.random.randint(0, 3)
-        self.introduce_error(error_location)
-        
-        # 4. Run the detection and correction protocol
-        self._detect_and_correct()
-        
-        # 5. Save the final "corrected" state
-        self.circuit.save_statevector(label="corrected_state")
-        
-        # Run simulation
-        backend = AerSimulator()
-        result = backend.run(self.circuit).result()
-        
-        # 6. Compare the two statevectors
-        correct_state = result.data()['correct_encoded_state']
-        corrected_state = result.data()['corrected_state']
-        
-        success = correct_state.equiv(corrected_state)
-
-        return {
-            "success": success,
-            "initial_state": self.initial_state.data,
-            "error_location": error_location
-        }
+    backend = AerSimulator()
+    counts = (
+        backend.run(transpile(qc, backend), shots=shots, seed_simulator=seed).result().get_counts()
+    )
+    # Keys look like "o ss": the out register comes first.
+    flips = sum(c for key, c in counts.items() if key.split()[0] == "1")
+    return flips / shots

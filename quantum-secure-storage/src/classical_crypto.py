@@ -1,42 +1,24 @@
-# src/classical_crypto.py
+"""AES-256-GCM encryption for the stored data.
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
+GCM authenticates as well as encrypts: decrypting with the wrong key, or
+decrypting a ciphertext someone edited, raises cryptography's InvalidTag.
+The 12-byte random nonce goes in front of the ciphertext.
+"""
+
+from __future__ import annotations
+
 import os
 
-class ClassicalCrypto:
-    def __init__(self, key: bytes):
-        if len(key) != 32:
-            raise ValueError("Key must be 32 bytes long for AES-256.")
-        self.key = key
-        self.backend = default_backend()
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    def encrypt(self, plaintext: bytes) -> (bytes, bytes, bytes):
-        """
-        Encrypts plaintext using AES-256 in GCM mode.
+NONCE_BYTES = 12
 
-        Returns:
-            (bytes, bytes, bytes): A tuple containing the (nonce, ciphertext, tag).
-        """
-        nonce = os.urandom(12)
-        cipher = Cipher(algorithms.AES(self.key), modes.GCM(nonce), backend=self.backend)
-        encryptor = cipher.encryptor()
-        
-        ciphertext = encryptor.update(plaintext) + encryptor.finalize()
-        # THE FIX: We must also return the authentication tag.
-        return nonce, ciphertext, encryptor.tag
 
-    def decrypt(self, nonce: bytes, ciphertext: bytes, tag: bytes) -> bytes:
-        """
-        Decrypts ciphertext using AES-256 in GCM mode.
-        """
-        # THE FIX: The tag must be provided to the GCM mode.
-        cipher = Cipher(algorithms.AES(self.key), modes.GCM(nonce, tag), backend=self.backend)
-        decryptor = cipher.decryptor()
-        
-        try:
-            plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-            return plaintext
-        except Exception:
-            # GCM will raise an error if the key is wrong or the data is tampered with.
-            return None
+def encrypt(key: bytes, plaintext: bytes, associated_data: bytes | None = None) -> bytes:
+    nonce = os.urandom(NONCE_BYTES)
+    return nonce + AESGCM(key).encrypt(nonce, plaintext, associated_data)
+
+
+def decrypt(key: bytes, blob: bytes, associated_data: bytes | None = None) -> bytes:
+    nonce, ciphertext = blob[:NONCE_BYTES], blob[NONCE_BYTES:]
+    return AESGCM(key).decrypt(nonce, ciphertext, associated_data)

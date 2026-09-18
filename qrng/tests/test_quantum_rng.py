@@ -1,39 +1,45 @@
-# tests/test_quantum_rng.py
+from collections import Counter
 
-import unittest
-from src.quantum_rng import QuantumRNG
+import pytest
 
-class TestQuantumRNG(unittest.TestCase):
-    """
-    Unit tests for the QuantumRNG class.
-    """
+from src.quantum_rng import random_bits, random_int
 
-    def setUp(self):
-        """Set up a QuantumRNG instance for each test."""
-        self.rng = QuantumRNG()
 
-    def test_generate_bits_returns_string(self):
-        """Test that generate_bits returns a string."""
-        bits = self.rng.generate_bits(8)
-        self.assertIsInstance(bits, str)
+def test_length_and_alphabet() -> None:
+    bits = random_bits(100, seed=1)
+    assert len(bits) == 100
+    assert set(bits) <= {"0", "1"}
 
-    def test_generate_bits_correct_length(self):
-        """Test that the generated bit string has the correct length."""
-        num_bits = 10
-        bits = self.rng.generate_bits(num_bits)
-        self.assertEqual(len(bits), num_bits)
 
-    def test_generate_bits_contains_only_0_and_1(self):
-        """Test that the generated bit string contains only '0' and '1'."""
-        bits = self.rng.generate_bits(16)
-        self.assertTrue(all(c in '01' for c in bits))
+def test_seed_makes_it_reproducible() -> None:
+    assert random_bits(64, seed=5) == random_bits(64, seed=5)
+    assert random_bits(64, seed=5) != random_bits(64, seed=6)
 
-    def test_invalid_input(self):
-        """Test that a non-positive integer for num_bits raises a ValueError."""
-        with self.assertRaises(ValueError):
-            self.rng.generate_bits(0)
-        with self.assertRaises(ValueError):
-            self.rng.generate_bits(-5)
 
-if __name__ == '__main__':
-    unittest.main()
+def test_roughly_balanced() -> None:
+    bits = random_bits(20000, seed=2)
+    assert bits.count("1") / len(bits) == pytest.approx(0.5, abs=0.015)
+
+
+def test_random_int_is_uniform_over_range() -> None:
+    rolls = Counter(random_int(1, 6, seed=s) for s in range(3000))
+    assert set(rolls) == {1, 2, 3, 4, 5, 6}
+    for count in rolls.values():
+        assert count == pytest.approx(500, abs=80)
+
+
+def test_random_int_edges() -> None:
+    assert random_int(7, 7, seed=0) == 7
+    assert 0 <= random_int(0, 1, seed=0) <= 1
+    assert -10 <= random_int(-10, 10, seed=3) <= 10
+
+
+@pytest.mark.parametrize("n", [0, -3])
+def test_rejects_non_positive_length(n: int) -> None:
+    with pytest.raises(ValueError):
+        random_bits(n)
+
+
+def test_rejects_empty_range() -> None:
+    with pytest.raises(ValueError):
+        random_int(5, 4)

@@ -1,124 +1,170 @@
-# src/shors.py
+"""Shor's factoring algorithm on the Qiskit Aer simulator.
+
+The quantum step is order finding: for a coprime to N, find the smallest r > 0
+with a**r = 1 (mod N). The rest is classical number theory.
+
+The phase-estimation layout follows the Shor's algorithm chapter of the Qiskit
+Textbook (Apache-2.0, see NOTICE). Modular multiplication is built as a
+permutation matrix, which is exact but grows exponentially with the bit length
+of N. That limits this code to small N on a simulator. Real hardware needs
+reversible arithmetic circuits instead.
+"""
+
+from __future__ import annotations
 
 import math
 import random
+from dataclasses import dataclass
 from fractions import Fraction
+
 import numpy as np
-# REMOVE 'assemble' from this import
 from qiskit import QuantumCircuit, transpile
-from qiskit_aer import Aer, AerSimulator
-from qiskit.circuit.library import QFT
+from qiskit.circuit.library import QFTGate, UnitaryGate
+from qiskit_aer import AerSimulator
 
-class Shor:
+# 7-bit N needs 21 qubits and ~15 s per attempt. 8 bits would need 24 qubits.
+MAX_BITS = 7
+
+
+@dataclass(frozen=True)
+class FactorResult:
+    n: int
+    factors: tuple[int, int]
+    method: str  # "even", "perfect power", "gcd" or "order finding"
+    a: int | None = None
+    order: int | None = None
+    attempts: int = 0
+
+
+def controlled_mult_mod(a: int, n: int, num_bits: int) -> UnitaryGate:
+    """Controlled |x> -> |a*x mod n> on `num_bits` target qubits.
+
+    Qubit 0 of the gate is the control. Basis states with x >= n are left
+    alone, which keeps the matrix a permutation. Requires gcd(a, n) == 1.
     """
-    Encapsulates the logic for Shor's integer factorization algorithm.
+    if math.gcd(a, n) != 1:
+        raise ValueError(f"a={a} is not coprime to n={n}")
+    dim = 2**num_bits
+    matrix = np.zeros((2 * dim, 2 * dim))
+    # Qiskit is little-endian: with the control on qubit 0, index = ctrl + 2*x.
+    for x in range(dim):
+        y = (a * x) % n if x < n else x
+        matrix[2 * x, 2 * x] = 1
+        matrix[2 * y + 1, 2 * x + 1] = 1
+    return UnitaryGate(matrix, label=f"{a}x mod {n}")
+
+
+def order_finding_circuit(a: int, n: int) -> QuantumCircuit:
+    """Phase estimation of x -> a*x mod n, with 2*bits(n) counting qubits."""
+    num_bits = n.bit_length()
+    num_counting = 2 * num_bits
+    work = list(range(num_counting, num_counting + num_bits))
+
+    qc = QuantumCircuit(num_counting + num_bits, num_counting)
+    qc.h(range(num_counting))
+    qc.x(work[0])  # work register starts in |1>
+
+    # Counting qubit j controls U^(2^j). Computing a^(2^j) mod n classically
+    # gives that power as a single multiplication.
+    for j in range(num_counting):
+        qc.append(controlled_mult_mod(pow(a, 2**j, n), n, num_bits), [j, *work])
+
+    qc.append(QFTGate(num_counting).inverse(), range(num_counting))
+    qc.measure(range(num_counting), range(num_counting))
+    return qc
+
+
+def order_from_counts(counts: dict[str, int], a: int, n: int) -> int | None:
+    """Recover r from phase-estimation counts with continued fractions.
+
+    A reading y gives y / 2^t ~ s/r. When gcd(s, r) > 1 the denominator is only
+    a divisor of r, so this also tries the lcm of the denominators seen so far.
+    Returns r with a**r = 1 (mod n), or None if no reading worked.
     """
+    r = 1
+    for bits, _ in sorted(counts.items(), key=lambda item: -item[1]):
+        phase = Fraction(int(bits, 2), 2 ** len(bits))
+        d = phase.limit_denominator(n).denominator
+        if pow(a, d, n) == 1:
+            return d
+        r = math.lcm(r, d)
+        if pow(a, r, n) == 1:
+            return r
+    return None
 
-    def __init__(self, N: int):
-        if not isinstance(N, int) or N <= 1:
-            raise ValueError("N must be an integer greater than 1.")
-        self.N = N
-        self.backend = Aer.get_backend('aer_simulator')
 
-    def _classical_pre_checks(self):
-        """Perform classical checks to find factors more easily."""
-        if self.N % 2 == 0:
-            return 2, self.N // 2
-        
-        # This check is not part of Shor's but can find factors for non-prime composites
-        for i in range(3, int(math.sqrt(self.N)) + 1, 2):
-             if self.N % i == 0:
-                return i, self.N // i
-        
-        return None, None
+def find_order(a: int, n: int, shots: int = 16, seed: int | None = None) -> int | None:
+    """Run order finding for a mod n on the simulator."""
+    backend = AerSimulator()
+    circuit = transpile(order_finding_circuit(a, n), backend)
+    counts = backend.run(circuit, shots=shots, seed_simulator=seed).result().get_counts()
+    return order_from_counts(counts, a, n)
 
-    def _get_period(self, a: int):
-        """Finds the period 'r' of the function f(x) = a^x mod N using a quantum circuit."""
-        n_count = self.N.bit_length()
-        
-        qc = QuantumCircuit(n_count * 2, n_count)
-        qc.h(range(n_count))
-        qc.x(n_count * 2 - 1)
 
-        for q in range(n_count):
-            qc.append(self._c_amodN(a, 2**q, self.N, n_count), 
-                      [q] + list(range(n_count, n_count * 2)))
+def factor(
+    n: int,
+    a: int | None = None,
+    max_attempts: int = 10,
+    shots: int = 16,
+    seed: int | None = None,
+) -> FactorResult:
+    """Find a non-trivial factor pair of n.
 
-        qc.append(QFT(n_count, do_swaps=False).inverse(), range(n_count))
-        qc.measure(range(n_count), range(n_count))
-        
-        # Modern execution workflow
-        t_qc = transpile(qc, self.backend)
-        result = self.backend.run(t_qc, shots=1, memory=True).result()
-        readings = result.get_memory()
-        phase = int(readings[0], 2) / (2**n_count)
+    Pass `a` to skip the random choice and force a particular base, e.g.
+    factor(15, a=7). Raises ValueError for n that is prime, too small or too
+    large to simulate, and RuntimeError if every attempt fails.
+    """
+    _check_input(n)
 
-        frac = Fraction(phase).limit_denominator(self.N)
-        r = frac.denominator
-        return r
+    if n % 2 == 0:
+        return FactorResult(n, (2, n // 2), "even")
+    base = _perfect_power_base(n)
+    if base is not None:
+        return FactorResult(n, (base, n // base), "perfect power")
 
-    def run(self):
-        """
-        Executes the full Shor's algorithm.
-        """
-        p, q = self._classical_pre_checks()
-        if p:
-            return {"status": "SUCCESS", "factors": (p, q), "method": "Classical Check"}
+    rng = random.Random(seed)
+    for attempt in range(1, max_attempts + 1):
+        base_a = a if a is not None else rng.randrange(2, n - 1)
+        g = math.gcd(base_a, n)
+        if g > 1:
+            # A lucky guess. Real Shor runs hit this with tiny N all the time.
+            return FactorResult(n, (g, n // g), "gcd", a=base_a, attempts=attempt)
 
-        while True:
-            a = random.randint(2, self.N - 1)
-            gcd_val = math.gcd(a, self.N)
-            if gcd_val > 1:
-                return {"status": "SUCCESS", "factors": (gcd_val, self.N // gcd_val), "method": "Lucky Guess"}
+        r = find_order(base_a, n, shots=shots, seed=rng.randrange(2**31))
+        if r is None or r % 2 == 1:
+            continue
+        x = pow(base_a, r // 2, n)
+        if x == n - 1:
+            continue
+        for p in (math.gcd(x - 1, n), math.gcd(x + 1, n)):
+            if 1 < p < n:
+                return FactorResult(
+                    n, (p, n // p), "order finding", a=base_a, order=r, attempts=attempt
+                )
 
-            print(f"Attempting period-finding for a = {a}...")
-            r = self._get_period(a)
+    raise RuntimeError(f"no factor of {n} found in {max_attempts} attempts")
 
-            if r is None or r % 2 != 0:
-                print(f"Period r={r} is odd or invalid. Trying a new 'a'.")
-                continue
-            
-            factor1 = math.gcd(a**(r//2) + 1, self.N)
-            factor2 = math.gcd(a**(r//2) - 1, self.N)
 
-            if factor1 != 1 and factor1 != self.N:
-                return {"status": "SUCCESS", "factors": (factor1, self.N // factor1), "method": "Shor's Algorithm"}
-            if factor2 != 1 and factor2 != self.N:
-                return {"status": "SUCCESS", "factors": (factor2, self.N // factor2), "method": "Shor's Algorithm"}
-            
-            print("Found trivial factors. Trying a new 'a'.")
+def _check_input(n: int) -> None:
+    if n < 4:
+        raise ValueError("n must be a composite number >= 4")
+    if n.bit_length() > MAX_BITS:
+        raise ValueError(f"n={n} needs more than {MAX_BITS} bits; too large to simulate")
+    if _is_prime(n):
+        raise ValueError(f"{n} is prime")
 
-    # Helper methods for building the modular exponentiation circuit
-    def _c_amodN(self, a, power, N, n_count):
-        """Controlled multiplication by a mod N."""
-        U = QuantumCircuit(n_count)
-        for _ in range(power):
-            U.append(self._amodN(a, N, n_count), range(n_count))
-        
-        U = U.to_gate()
-        U.name = f"{a}^{power} mod {N}"
-        c_U = U.control()
-        return c_U
 
-    def _amodN(self, a, N, n_count):
-        """Circuit for multiplication by a mod N."""
-        if N != 15:
-            raise NotImplementedError("This demo only supports N=15 for the modular exponentiation circuit.")
-        
-        qc = QuantumCircuit(n_count)
-        if a == 2 or a == 8: # 2^1=2, 2^2=4, 2^3=8, 2^4=1 -> period 4
-            qc.swap(0, 1)
-            qc.swap(1, 2)
-            qc.swap(2, 3)
-        elif a == 4 or a == 11: # 4^1=4, 4^2=1 -> period 2
-            qc.swap(0, 2)
-            qc.swap(1, 3)
-        elif a == 7 or a == 13: # 7^1=7, 7^2=4, 7^3=13, 7^4=1 -> period 4
-            qc.swap(0, 1)
-            qc.swap(1, 2)
-            qc.swap(2, 3)
-            qc.x(range(4))
-        
-        gate = qc.to_gate()
-        gate.name = f"*{a} mod {N}"
-        return gate
+def _is_prime(n: int) -> bool:
+    if n < 2:
+        return False
+    return all(n % d for d in range(2, math.isqrt(n) + 1))
+
+
+def _perfect_power_base(n: int) -> int | None:
+    """Return b if n == b**k for some k >= 2, else None."""
+    for k in range(2, n.bit_length() + 1):
+        b = round(n ** (1 / k))
+        for candidate in (b - 1, b, b + 1):
+            if candidate > 1 and candidate**k == n:
+                return candidate
+    return None

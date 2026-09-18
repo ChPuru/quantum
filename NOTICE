@@ -1,0 +1,25 @@
+ChPuru/quantum
+Copyright (c) 2025-2026 Purunjay Choudhary
+Licensed under the MIT License. See LICENSE.
+
+Third-party material
+--------------------
+
+Parts of this repository are adapted from the Qiskit Textbook
+(https://github.com/Qiskit/textbook), which is licensed under the Apache
+License, Version 2.0. A copy of that license is in LICENSES/Apache-2.0.txt.
+The adapted parts have been modified.
+
+- shors-algorithm/: the phase-estimation layout and the continued-fraction
+  post-processing follow the textbook's "Shor's Algorithm" chapter. Versions
+  of src/shors.py and notebooks/01_Shor_Walkthrough.ipynb before the MIT
+  license was added also contained a modified copy of the textbook's
+  c_amod15 and qpe_amod15 functions.
+- quantum-teleportation/: the circuit layout and the split into z and x
+  classical registers follow the textbook's "Quantum Teleportation" chapter.
+- grover-search/: the diffuser construction follows the textbook's
+  "Grover's Algorithm" chapter.
+- qkd-bb84/ and quantum-secure-storage/: versions before the MIT license
+  was added built one single-qubit circuit per bit and measured each with
+  shots=1 and memory=True, as in the textbook's "Quantum Key Distribution"
+  chapter. The current versions batch the qubits differently.

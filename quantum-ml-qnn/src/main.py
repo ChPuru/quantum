@@ -1,34 +1,23 @@
-# src/main.py
+import argparse
 
-import numpy as np
-from src.qnn_classifier import QNNClassifier, load_and_preprocess_data
+from src.qnn_classifier import QNNClassifier, make_dataset
 
-def main():
-    # Define parameters
-    NUM_QUBITS = 2  # Number of features/qubits
-    FEATURE_DIM = 2 # Dimension of the input data
-    NUM_SAMPLES = 100
 
-    try:
-        print("--- Quantum Neural Network Classifier ---")
-        
-        # 1. Load and prepare data
-        X_train, X_test, y_train, y_test = load_and_preprocess_data(NUM_SAMPLES)
-        print(f"Data loaded: {len(X_train)} training samples, {len(X_test)} test samples.")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train a VQC on two Gaussian blobs.")
+    parser.add_argument("--samples", type=int, default=100)
+    parser.add_argument("--maxiter", type=int, default=60)
+    parser.add_argument("--seed", type=int, default=1)
+    args = parser.parse_args()
 
-        # 2. Initialize and train the classifier
-        classifier = QNNClassifier(num_qubits=NUM_QUBITS, feature_dim=FEATURE_DIM)
-        classifier.train(X_train, y_train)
+    data = make_dataset(args.samples, seed=args.seed)
+    print(f"{len(data.x_train)} training samples, {len(data.x_test)} test samples")
 
-        # 3. Evaluate the model
-        accuracy = classifier.evaluate(X_test, y_test)
+    model = QNNClassifier(maxiter=args.maxiter, seed=args.seed).fit(data.x_train, data.y_train)
+    print(f"final training loss  {model.loss_history[-1]:.4f}")
+    print(f"train accuracy       {model.score(data.x_train, data.y_train):.1%}")
+    print(f"test accuracy        {model.score(data.x_test, data.y_test):.1%}")
 
-        print("\n--- Results ---")
-        print(f"Test Accuracy: {accuracy:.2%}")
-        print("-----------------")
-
-    except Exception as e:
-        print(f"\nAn error occurred: {e}")
 
 if __name__ == "__main__":
     main()

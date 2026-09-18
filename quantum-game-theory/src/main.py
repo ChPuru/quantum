@@ -1,41 +1,23 @@
-# src/main.py
+import argparse
 
-from src.quantum_penny_flip import QuantumPennyFlip
+from src.quantum_penny_flip import PICARD_MOVES, payoff_table, play
 
-def main():
-    NUM_GAMES = 1000
-    game_simulator = QuantumPennyFlip()
 
-    print("--- Quantum Penny Flip Game Simulation ---")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Meyer's quantum penny flip game.")
+    parser.add_argument("--games", type=int, default=10000)
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
 
-    # --- Scenario 1: Classical vs. Classical ---
-    # Q's classical strategy is to do nothing ('identity').
-    # Picard randomly flips or does nothing.
-    print(f"\nRunning {NUM_GAMES} games with Classical strategies...")
-    classical_win_rate = game_simulator.simulate_games(
-        num_games=NUM_GAMES,
-        q_strategy='identity',
-        picard_strategy='random' # This is handled inside the simulate_games loop
-    )
-    print(f"Q's Win Rate (Classical Strategy): {classical_win_rate:.2%}")
+    print("P(Q wins) for each pure Q strategy")
+    print("Q moves   " + "   ".join(f"Picard {p}" for p in PICARD_MOVES))
+    for (a, b), row in payoff_table().items():
+        print(f"{a}, {b}      " + "       ".join(f"{row[p]:.2f}" for p in PICARD_MOVES))
 
-    # --- Scenario 2: Quantum vs. Classical ---
-    # Q's quantum strategy is to apply a Hadamard gate.
-    # Picard randomly flips or does nothing.
-    print(f"\nRunning {NUM_GAMES} games with Q's Quantum strategy...")
-    quantum_win_rate = game_simulator.simulate_games(
-        num_games=NUM_GAMES,
-        q_strategy='hadamard',
-        picard_strategy='random'
-    )
-    print(f"Q's Win Rate (Quantum Strategy): {quantum_win_rate:.2%}")
+    print(f"\n{args.games} games against a Picard who flips at random")
+    print(f"classical Q wins    {play(args.games, 'classical', seed=args.seed):.1%}")
+    print(f"quantum Q wins      {play(args.games, 'quantum', seed=args.seed):.1%}")
 
-    print("\n--- Conclusion ---")
-    if quantum_win_rate > classical_win_rate + 0.4:
-        print("The quantum strategy provides a decisive advantage, as expected.")
-    else:
-        print("The quantum strategy did not show a significant advantage.")
-    print("------------------")
 
 if __name__ == "__main__":
     main()

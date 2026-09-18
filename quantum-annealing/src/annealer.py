@@ -1,106 +1,104 @@
-# src/annealer.py
+"""Adiabatic quantum annealing for MaxCut, simulated with an exact statevector.
 
-import numpy as np
+The anneal follows H(s) = (1 - s) * H_driver + s * H_problem for s from 0 to 1:
+
+    H_driver  = -sum_i X_i         ground state |+>^n, easy to prepare
+    H_problem =  sum_ij w_ij Z_i Z_j   ground states are the maximum cuts
+
+If s moves slowly enough compared with the energy gap, the state stays close
+to the instantaneous ground state and ends on a maximum cut (adiabatic
+theorem). A fast sweep leaves population in excited states.
+
+This is a classical simulation of the Schrodinger equation, not a run on an
+annealer. It uses Qiskit only to build the Pauli operators, and it is limited
+to about 16 nodes.
+"""
+
+from __future__ import annotations
+
+import itertools
+from collections.abc import Hashable
+from dataclasses import dataclass
+
 import networkx as nx
-from scipy.linalg import expm
+import numpy as np
+from qiskit.quantum_info import SparsePauliOp
+from scipy.sparse.linalg import expm_multiply
 
-class QuantumAnnealer:
-    """
-    A classical simulator for a quantum annealing process to solve Max-Cut.
-    """
+MAX_NODES = 16
 
-    def __init__(self, graph: nx.Graph):
-        self.graph = graph
-        self.num_nodes = len(graph.nodes)
-        self.H_problem = self._create_problem_hamiltonian()
-        self.H_driver = self._create_driver_hamiltonian()
 
-    def _create_problem_hamiltonian(self):
-        """Creates the Ising Hamiltonian for the Max-Cut problem."""
-        dim = 2**self.num_nodes
-        hamiltonian = np.zeros((dim, dim))
-        
-        # The Ising model energy is -sum(J_ij * s_i * s_j)
-        # For Max-Cut, J_ij = -1 if there is an edge, 0 otherwise.
-        # We represent spins s_i as Pauli Z matrices.
-        for i in range(self.num_nodes):
-            for j in range(i + 1, self.num_nodes):
-                if self.graph.has_edge(i, j):
-                    # J_ij = -1, so we add Z_i * Z_j to the Hamiltonian
-                    hamiltonian += self._get_pauli_product('Z', i, 'Z', j)
-        return hamiltonian
+@dataclass(frozen=True)
+class AnnealResult:
+    probabilities: np.ndarray  # over basis states, index bit i = node i
+    best_assignment: dict[Hashable, int]  # most likely final state
+    best_cut: float
+    max_cut: float  # found by brute force
+    success_probability: float  # total probability on maximum cuts
 
-    def _create_driver_hamiltonian(self):
-        """Creates the transverse field (driver) Hamiltonian."""
-        dim = 2**self.num_nodes
-        hamiltonian = np.zeros((dim, dim))
-        # The driver is the sum of Pauli X matrices for each qubit.
-        for i in range(self.num_nodes):
-            hamiltonian += self._get_pauli_product('X', i)
-        return -hamiltonian # Conventionally negative
 
-    def _get_pauli_product(self, p1, i1, p2=None, i2=None):
-        """Helper to construct the matrix for a product of Pauli operators."""
-        pauli_map = {
-            'I': np.eye(2),
-            'X': np.array([[0, 1], [1, 0]]),
-            'Z': np.array([[1, 0], [0, -1]])
-        }
-        
-        op_list = [pauli_map['I']] * self.num_nodes
-        op_list[i1] = pauli_map[p1]
-        if p2 is not None:
-            op_list[i2] = pauli_map[p2]
-            
-        # Use Kronecker product to build the full matrix
-        full_op = op_list[0]
-        for op in op_list[1:]:
-            full_op = np.kron(full_op, op)
-        return full_op
+def _edges(graph: nx.Graph) -> list[tuple[int, int, float]]:
+    index = {node: i for i, node in enumerate(graph.nodes)}
+    return [(index[u], index[v], float(d.get("weight", 1.0))) for u, v, d in graph.edges(data=True)]
 
-    def anneal(self, total_time: float = 5.0, time_steps: int = 100):
-        """
-        Simulates the quantum annealing process.
-        """
-        # 1. Initial state: Uniform superposition of all possible states
-        # This is the ground state of the driver Hamiltonian.
-        initial_state = np.ones(2**self.num_nodes) / np.sqrt(2**self.num_nodes)
-        current_state = initial_state.astype(complex)
-        
-        dt = total_time / time_steps
 
-        # 2. Annealing schedule: A(t) and B(t)
-        # A(t) controls the driver, starts high and goes to zero.
-        # B(t) controls the problem, starts at zero and goes high.
-        for t_step in range(time_steps + 1):
-            s = t_step / time_steps
-            A_s = 1 - s
-            B_s = s
-            
-            # 3. Construct the time-dependent Hamiltonian
-            H_t = A_s * self.H_driver + B_s * self.H_problem
-            
-            # 4. Evolve the state using the Schrödinger equation: psi(t+dt) = e^(-i*H*dt) * psi(t)
-            U_t = expm(-1j * H_t * dt)
-            current_state = U_t @ current_state
+def problem_hamiltonian(graph: nx.Graph) -> SparsePauliOp:
+    n = graph.number_of_nodes()
+    terms = [("ZZ", [i, j], w) for i, j, w in _edges(graph)]
+    return SparsePauliOp.from_sparse_list(terms, num_qubits=n).simplify()
 
-        # 5. Measure the final state
-        probabilities = np.abs(current_state)**2
-        most_likely_state_index = np.argmax(probabilities)
-        
-        # Convert the index to a binary string (spin configuration)
-        solution_str = format(most_likely_state_index, f'0{self.num_nodes}b')
-        return solution_str
 
-    def get_max_cut_solution(self, solution_str: str):
-        """Calculates the Max-Cut value for a given solution string."""
-        cut_count = 0
-        for i, j in self.graph.edges():
-            if solution_str[i] != solution_str[j]:
-                cut_count += 1
-        
-        partition = (
-            [node for node, bit in enumerate(solution_str) if bit == '0'],
-            [node for node, bit in enumerate(solution_str) if bit == '1']
-        )
-        return cut_count, partition
+def driver_hamiltonian(n: int) -> SparsePauliOp:
+    return SparsePauliOp.from_sparse_list([("X", [i], -1.0) for i in range(n)], num_qubits=n)
+
+
+def cut_values(graph: nx.Graph) -> np.ndarray:
+    """Cut value of every basis state, indexed the same way as the statevector."""
+    n = graph.number_of_nodes()
+    index = np.arange(2**n)
+    cuts = np.zeros(2**n)
+    for i, j, w in _edges(graph):
+        cuts += w * (((index >> i) ^ (index >> j)) & 1)
+    return cuts
+
+
+def anneal(graph: nx.Graph, total_time: float = 10.0, steps: int = 200) -> AnnealResult:
+    """Evolve |+>^n under H(s) with a linear schedule, in `steps` equal slices."""
+    n = graph.number_of_nodes()
+    if n < 2 or graph.number_of_edges() == 0:
+        raise ValueError("graph needs at least two nodes and one edge")
+    if n > MAX_NODES:
+        raise ValueError(f"{n} nodes is too many to simulate exactly (max {MAX_NODES})")
+
+    h_driver = driver_hamiltonian(n).to_matrix(sparse=True)
+    h_problem = problem_hamiltonian(graph).to_matrix(sparse=True)
+
+    state = np.full(2**n, 2 ** (-n / 2), dtype=complex)
+    dt = total_time / steps
+    for k in range(steps):
+        s = (k + 0.5) / steps  # midpoint of the slice
+        h = (1 - s) * h_driver + s * h_problem
+        state = expm_multiply(-1j * dt * h, state)
+
+    probabilities = np.abs(state) ** 2
+    cuts = cut_values(graph)
+    max_cut = cuts.max()
+    best_index = int(np.argmax(probabilities))
+    nodes = list(graph.nodes)
+
+    return AnnealResult(
+        probabilities=probabilities,
+        best_assignment={node: (best_index >> i) & 1 for i, node in enumerate(nodes)},
+        best_cut=float(cuts[best_index]),
+        max_cut=float(max_cut),
+        success_probability=float(probabilities[np.isclose(cuts, max_cut)].sum()),
+    )
+
+
+def brute_force_maxcut(graph: nx.Graph) -> float:
+    n = graph.number_of_nodes()
+    edges = _edges(graph)
+    return max(
+        sum(w for i, j, w in edges if bits[i] != bits[j])
+        for bits in itertools.product((0, 1), repeat=n)
+    )

@@ -1,143 +1,143 @@
-# src/bb84.py
+"""BB84 quantum key distribution with an optional intercept-resend eavesdropper.
+
+The qubits never interact and every gate is a Clifford gate, so the code packs
+them into circuits of up to 64 qubits and runs those on Aer's stabilizer
+method in a single job.
+
+Bases are 0 for Z (|0>, |1>) and 1 for X (|+>, |->).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
 
 import numpy as np
-from qiskit import QuantumCircuit
+from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
 from qiskit_aer import AerSimulator
 
-# Define the two bases
-Z_BASIS = 'Z'  # Computational basis |0>, |1>
-X_BASIS = 'X'  # Hadamard basis |+>, |->
+Z, X = 0, 1
 
-class BB84:
-    """
-    Encapsulates the logic for the BB84 Quantum Key Distribution protocol.
-    """
+# Shor-Preskill: one-way post-processing can still distil a secret key up to ~11% QBER.
+QBER_LIMIT = 0.11
 
-    def __init__(self, num_bits: int):
-        if not isinstance(num_bits, int) or num_bits <= 0:
-            raise ValueError("Number of bits must be a positive integer.")
-        self.num_bits = num_bits
-        self.alice_bits = np.random.randint(2, size=num_bits)
-        self.alice_bases = np.random.choice([Z_BASIS, X_BASIS], size=num_bits)
-        self.bob_bases = np.random.choice([Z_BASIS, X_BASIS], size=num_bits)
-        self.backend = AerSimulator()
+CHUNK = 64
 
-    def _encode_qubits(self):
-        """Alice encodes her bits onto qubits based on her chosen bases."""
-        qubits = []
-        for i in range(self.num_bits):
-            qc = QuantumCircuit(1, 1)
-            # Encode bit 1
-            if self.alice_bits[i] == 1:
-                qc.x(0)
-            # Apply basis transformation
-            if self.alice_bases[i] == X_BASIS:
-                qc.h(0)
-            qubits.append(qc)
-        return qubits
 
-    def _measure_qubits(self, qubits, bases):
-        """Measures a list of qubits using a corresponding list of bases."""
-        measured_bits = []
-        for i in range(len(qubits)):
-            qc = qubits[i]
-            # Apply basis transformation for measurement
-            if bases[i] == X_BASIS:
-                qc.h(0)
-            qc.measure(0, 0)
+@dataclass(frozen=True)
+class BB84Result:
+    alice_bits: np.ndarray
+    alice_bases: np.ndarray
+    bob_bases: np.ndarray
+    bob_bits: np.ndarray
+    eve_bases: np.ndarray | None
+    sifted: np.ndarray  # positions where Alice and Bob used the same basis
+    checked: np.ndarray  # sifted positions revealed to estimate the error rate
+    qber: float
+    alice_key: str
+    bob_key: str
 
-            # Simulate the circuit
-            job = self.backend.run(qc, shots=1, memory=True)
-            result = job.result()
-            measured_bit = int(result.get_memory(qc)[0])
-            measured_bits.append(measured_bit)
-        return np.array(measured_bits)
+    @property
+    def aborted(self) -> bool:
+        return self.qber > QBER_LIMIT
 
-    def _sift_keys(self, bob_measured_bits):
-        """Alice and Bob compare bases and keep bits where bases matched."""
-        matching_bases_indices = np.where(self.alice_bases == self.bob_bases)[0]
-        
-        alice_sifted_key = self.alice_bits[matching_bases_indices]
-        bob_sifted_key = bob_measured_bits[matching_bases_indices]
-        
-        return alice_sifted_key, bob_sifted_key
 
-    def _check_for_eavesdropper(self, alice_key, bob_key, sample_size=0.5):
-        """
-        Alice and Bob compare a sample of their keys to detect Eve.
-        Returns the final key and the error rate.
-        """
-        if len(alice_key) == 0:
-            return np.array([]), 0.0
+def bb84_circuit(
+    alice_bits: np.ndarray,
+    alice_bases: np.ndarray,
+    bob_bases: np.ndarray,
+    eve_bases: np.ndarray | None = None,
+) -> QuantumCircuit:
+    n = len(alice_bits)
+    bob = ClassicalRegister(n, "bob")
+    qc = QuantumCircuit(QuantumRegister(n, "q"), bob)
 
-        num_samples = int(len(alice_key) * sample_size)
-        if num_samples == 0 and len(alice_key) > 0:
-            num_samples = 1 # Ensure at least one sample for small keys
+    def on(mask: np.ndarray) -> list[int]:
+        return np.flatnonzero(mask).tolist()
 
-        sample_indices = np.random.choice(len(alice_key), num_samples, replace=False)
-        
-        alice_sample = alice_key[sample_indices]
-        bob_sample = bob_key[sample_indices]
+    if ones := on(alice_bits == 1):
+        qc.x(ones)
+    if alice_x := on(alice_bases == X):
+        qc.h(alice_x)
 
-        # Calculate error rate
-        errors = np.sum(alice_sample != bob_sample)
-        error_rate = errors / num_samples if num_samples > 0 else 0.0
+    if eve_bases is not None:
+        eve = ClassicalRegister(n, "eve")
+        qc.add_register(eve)
+        qc.barrier()
+        # Eve measures in her basis and sends on the state she measured.
+        eve_x = on(eve_bases == X)
+        if eve_x:
+            qc.h(eve_x)
+        qc.measure(range(n), eve)
+        if eve_x:
+            qc.h(eve_x)
 
-        # The final key is what's left after removing the public samples
-        final_key_indices = np.setdiff1d(np.arange(len(alice_key)), sample_indices)
-        final_key = alice_key[final_key_indices]
+    qc.barrier()
+    if bob_x := on(bob_bases == X):
+        qc.h(bob_x)
+    qc.measure(range(n), bob)
+    return qc
 
-        return final_key, error_rate
 
-    def simulate(self, eavesdrop: bool = False):
-        """
-        Runs the full BB84 simulation.
+def _register_bits(qc: QuantumCircuit, memory: str) -> dict[str, np.ndarray]:
+    # Memory lists registers last-first, each with bit 0 on the right.
+    parts = memory.split()
+    return {
+        reg.name: np.array([int(b) for b in reversed(part)])
+        for reg, part in zip(reversed(qc.cregs), parts, strict=True)
+    }
 
-        Args:
-            eavesdrop (bool): If True, an eavesdropper (Eve) will intercept
-                              and measure the qubits.
 
-        Returns:
-            dict: A dictionary containing the results of the simulation.
-        """
-        # 1. Alice encodes her qubits
-        alice_qubits = self._encode_qubits()
+def run(
+    n_bits: int = 100,
+    eavesdrop: bool = False,
+    check_fraction: float = 0.5,
+    seed: int | None = None,
+) -> BB84Result:
+    """Run the protocol once: send, sift, reveal a sample, estimate the QBER."""
+    if n_bits < 1:
+        raise ValueError("n_bits must be positive")
+    if not 0 < check_fraction < 1:
+        raise ValueError("check_fraction must be between 0 and 1")
 
-        # 2. Eve intercepts (optional)
-        if eavesdrop:
-            eve_bases = np.random.choice([Z_BASIS, X_BASIS], size=self.num_bits)
-            eve_measured_bits = self._measure_qubits(alice_qubits, eve_bases)
-            # Eve resends new qubits based on her measurements
-            bob_received_qubits = self._re_encode_for_eve(eve_measured_bits, eve_bases)
-        else:
-            bob_received_qubits = alice_qubits
+    rng = np.random.default_rng(seed)
+    alice_bits = rng.integers(2, size=n_bits)
+    alice_bases = rng.integers(2, size=n_bits)
+    bob_bases = rng.integers(2, size=n_bits)
+    eve_bases = rng.integers(2, size=n_bits) if eavesdrop else None
 
-        # 3. Bob measures the qubits he receives
-        bob_measured_bits = self._measure_qubits(bob_received_qubits, self.bob_bases)
+    chunks = [slice(i, i + CHUNK) for i in range(0, n_bits, CHUNK)]
+    circuits = [
+        bb84_circuit(
+            alice_bits[c], alice_bases[c], bob_bases[c], None if eve_bases is None else eve_bases[c]
+        )
+        for c in chunks
+    ]
+    backend = AerSimulator(method="stabilizer")
+    result = backend.run(
+        circuits, shots=1, memory=True, seed_simulator=int(rng.integers(2**31))
+    ).result()
+    bob_bits = np.concatenate(
+        [_register_bits(qc, result.get_memory(qc)[0])["bob"] for qc in circuits]
+    )
 
-        # 4. Alice and Bob sift their keys
-        alice_sifted_key, bob_sifted_key = self._sift_keys(bob_measured_bits)
+    sifted = np.flatnonzero(alice_bases == bob_bases)
+    if len(sifted) == 0:
+        checked = sifted
+    else:
+        k = max(1, round(len(sifted) * check_fraction))
+        checked = np.sort(rng.choice(sifted, size=k, replace=False))
+    kept = np.setdiff1d(sifted, checked)
+    qber = float(np.mean(alice_bits[checked] != bob_bits[checked])) if len(checked) else 0.0
 
-        # 5. Alice and Bob check for an eavesdropper
-        final_key, error_rate = self._check_for_eavesdropper(alice_sifted_key, bob_sifted_key)
-
-        return {
-            "initial_key_length": self.num_bits,
-            "sifted_key_length": len(alice_sifted_key),
-            "final_key_length": len(final_key),
-            "error_rate": error_rate,
-            "eavesdropper_detected": error_rate > 0.1, # Threshold can be adjusted
-            "final_key": ''.join(map(str, final_key))
-        }
-
-    def _re_encode_for_eve(self, bits, bases):
-        """Helper for Eve to create new qubits based on her measurements."""
-        qubits = []
-        for i in range(len(bits)):
-            qc = QuantumCircuit(1, 1)
-            if bits[i] == 1:
-                qc.x(0)
-            if bases[i] == X_BASIS:
-                qc.h(0)
-            qubits.append(qc)
-        return qubits
+    return BB84Result(
+        alice_bits=alice_bits,
+        alice_bases=alice_bases,
+        bob_bases=bob_bases,
+        bob_bits=bob_bits,
+        eve_bases=eve_bases,
+        sifted=sifted,
+        checked=checked,
+        qber=qber,
+        alice_key="".join(map(str, alice_bits[kept])),
+        bob_key="".join(map(str, bob_bits[kept])),
+    )

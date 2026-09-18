@@ -19,3 +19,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
